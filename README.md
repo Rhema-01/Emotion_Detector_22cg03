@@ -1,11 +1,12 @@
 # Emotion Detection Web App
 
 ## Overview
-This project is an Emotion Detection Web Application that utilizes AI to detect human emotions from images or live captures. The application is built using Flask for the backend and incorporates a trained emotion detection model.
+This project is an Emotion Detection Web Application made by Rhema that utilizes AI to detect human emotions based on images or live captures. 
+The application is built using Flask for the backend and incorporates a trained emotion detection model.
 
-## Project Structure
+## Structure of project
 ```
-STUDENTS-SURNAME_MAT.NO_EMOTION_DETECTION_WEB_APP
+LAMBERT_22cg031880_EMOTION_DETECTION_WEB_APP
 ├── app.py                  # Main backend of the web application
 ├── model.py                # Code for training the emotion detection model
 ├── requirements.txt        # Required libraries and packages
