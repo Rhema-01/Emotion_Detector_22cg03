@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Emotion Detection Web App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <style>
+        /* Minimal inline styles for layout */
+        body { font-family: Arial, sans-serif; padding: 18px; max-width: 900px; margin: auto; }
+        .container { display: grid; gap: 12px; }
+        video { width: 320px; height: 240px; background: #000; }
+        img#capturedImage { max-width: 320px; max-height: 240px; display:block; }
+        .button-group button { margin-right: 8px; }
+        #status { font-size: 0.9rem; color: #333; }
+        #error { color: #a00; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Emotion Detection</h1>
+        <p>Upload an image or use your webcam to detect emotions.</p>
+
+        <div>
+            <strong>Server / model status:</strong>
+            <span id="status">checking...</span>
+            <button id="refreshStatus">Refresh</button>
+        </div>
+
+        <div class="upload-section">
+            <input type="file" id="imageUpload" accept="image/*">
+            <button id="uploadButton">Upload Image</button>
+        </div>
+
+        <div class="webcam-section">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="canvas" style="display:none;"></canvas>
+            <div class="button-group">
+                <button id="startCamera">Start Camera</button>
+                <button id="stopCamera" disabled>Stop Camera</button>
+                <button id="captureButton" disabled>Capture Image</button>
+            </div>
+            <div class="preview">
+                <h4>Captured / Uploaded Image</h4>
+                <img id="capturedImage" src="" alt="Captured image will appear here">
+            </div>
+        </div>
+
+        <div class="result-section">
+            <h2>Detected Emotion:</h2>
+            <p id="emotionResult">None</p>
+            <div id="confidence"></div>
+            <div id="error"></div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const statusEl = document.getElementById('status');
+            const refreshBtn = document.getElementById('refreshStatus');
+            const video = document.getElementById('webcam');
+            const canvas = document.getElementById('canvas');
+            const capturedImage = document.getElementById('capturedImage');
+            const startBtn = document.getElementById('startCamera');
+            const stopBtn = document.getElementById('stopCamera');
+            const captureBtn = document.getElementById('captureButton');
+            const uploadBtn = document.getElementById('uploadButton');
+            const imageUpload = document.getElementById('imageUpload');
+            const emotionResult = document.getElementById('emotionResult');
+            const confidenceEl = document.getElementById('confidence');
+            const errorEl = document.getElementById('error');
+
+            let stream = null;
+
+            async function updateModelStatus() {
+                try {
+                    const res = await fetch('/model_status');
+                    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+                    const json = await res.json();
+                    console.log('model_status', json)
+                    statusEl.textContent = json.model_loaded ? `Model loaded (${json.classes?.join(',')||'no classes'})` : 'Model not loaded';
+                    statusEl.style.color = json.model_loaded ? 'green' : 'orange';
+                } catch (err) {
+                    statusEl.textContent = 'Server unreachable';
+                    statusEl.style.color = 'red';
+                    console.error('model_status error:', err);
+                }
+            }
+            refreshBtn.addEventListener('click', updateModelStatus);
+            updateModelStatus();
+
+            async function checkCameraPermissions() {
+                try {
+                    await navigator.mediaDevices.getUserMedia({ video: true });
+                    return true;
+                } catch (err) {
+                    if (err && err.name === 'NotAllowedError') {
+                        alert('Camera access denied. Allow camera in browser site settings for this page.');
+                    } else if (err && err.name === 'NotFoundError') {
+                        alert('No camera found. Connect a camera and try again.');
+                    } else {
+                        alert('Unable to access camera: ' + (err && err.message ? err.message : 'unknown error'));
+                    }
+                    return false;
+                }
+            }
+
+            startBtn.addEventListener('click', async () => {
+                const ok = await checkCameraPermissions();
+                if (!ok) return;
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+                    video.srcObject = stream;
+                    captureBtn.disabled = false;
+                    stopBtn.disabled = false;
+                    startBtn.disabled = true;
+                    errorEl.textContent = '';
+                } catch (err) {
+                    console.error('start camera error', err);
+                    errorEl.textContent = 'Error starting camera: ' + (err.message || err);
+                }
+            });
+
+            stopBtn.addEventListener('click', () => {
+                if (stream) {
+                    stream.getTracks().forEach(t => t.stop());
+                    stream = null;
+                }
+                video.srcObject = null;
+                captureBtn.disabled = true;
+                stopBtn.disabled = true;
+                startBtn.disabled = false;
+            });
+
+            captureBtn.addEventListener('click', () => {
+                if (!video.videoWidth || !video.videoHeight) {
+                    alert('Video not ready');
+                    return;
+                }
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const dataUrl = canvas.toDataURL('image/jpeg');
+                capturedImage.src = dataUrl;
+                // optionally stop camera after capture
+                // stopBtn.click();
+                detectEmotion(dataUrl);
+            });
+
+            uploadBtn.addEventListener('click', () => {
+                if (imageUpload.files.length === 0) {
+                    alert('Please select an image to upload.');
+                    return;
+                }
+                const file = imageUpload.files[0];
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    capturedImage.src = e.target.result;
+                    detectEmotion(e.target.result);
+                };
+                reader.onerror = (e) => {
+                    console.error('File read error', e);
+                    alert('Error reading file');
+                };
+                reader.readAsDataURL(file);
+            });
+
+            // Resize/compress helper to match training (48x48) and reduce payload
+            function resizeDataUrl(sourceDataUrl, targetW = 48, targetH = 48, quality = 0.7) {
+                return new Promise((resolve) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const c = document.createElement('canvas');
+                        c.width = targetW;
+                        c.height = targetH;
+                        const ctx = c.getContext('2d');
+                        // center-crop & draw preserving aspect ratio
+                        const sw = img.width, sh = img.height;
+                        const sRatio = sw / sh;
+                        const tRatio = targetW / targetH;
+                        let sx=0, sy=0, sWidth=sw, sHeight=sh;
+                        if (sRatio > tRatio) {
+                            // source is wider -> crop sides
+                            sWidth = Math.round(sh * tRatio);
+                            sx = Math.round((sw - sWidth) / 2);
+                        } else {
+                            // source is taller -> crop top/bottom
+                            sHeight = Math.round(sw / tRatio);
+                            sy = Math.round((sh - sHeight) / 2);
+                        }
+                        ctx.drawImage(img, sx, sy, sWidth, sHeight, 0, 0, targetW, targetH);
+                        resolve(c.toDataURL('image/jpeg', quality));
+                    };
+                    img.onerror = () => {
+                        // fallback: return original
+                        resolve(sourceDataUrl);
+                    };
+                    img.src = sourceDataUrl;
+                });
+            }
+
+            async function detectEmotion(imageData) {
+                errorEl.textContent = '';
+                emotionResult.textContent = 'Detecting...';
+                confidenceEl.textContent = '';
+                try {
+                    // Resize to expected model size and compress to keep under server limit
+                    const resizedData = await resizeDataUrl(imageData, 48, 48, 0.7);
+
+                    const response = await fetch('/detect_emotion', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image: resizedData })
+                    });
+
+                    const text = await response.text();
+                    let result = null;
+                    try { result = text ? JSON.parse(text) : null; } catch (e) { console.warn('Non-JSON response', text); }
+
+                    if (!response.ok) {
+                        console.error('Server returned error', response.status, text);
+                        errorEl.textContent = (result && result.error) ? result.error : `Server error ${response.status}`;
+                        emotionResult.textContent = 'Error';
+                        return;
+                    }
+
+                    emotionResult.textContent = result?.emotion ?? 'None';
+                    if (result?.confidence != null) {
+                        confidenceEl.textContent = `Confidence: ${(result.confidence * 100).toFixed(2)}%`;
+                    } else {
+                        confidenceEl.textContent = '';
+                    }
+                } catch (err) {
+                    console.error('Network or JS error', err);
+                    errorEl.textContent = 'Network error. See console.';
+                    emotionResult.textContent = 'Error';
+                }
+            }
+
+            // optional: allow pressing Enter when file selected to upload quickly
+            imageUpload.addEventListener('change', () => {
+                // preview selected file without auto sending; user must click Upload
+            });
+        });
+    </script>
+</body>
+</html>
